@@ -1,0 +1,6 @@
+{
+  "name": "PDFMaster Studio - 萬能轉 PDF 與頁面編排工具",
+  "description": "支援 Word (DOCX)、JPG、PNG、PDF 拖放轉檔，自由拖曳調整頁面順序、旋轉刪除，並支援合併輸出或 ZIP 批次下載。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
