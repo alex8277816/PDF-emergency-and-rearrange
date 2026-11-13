@@ -1,6 +1,7 @@
 import { PDFDocument, degrees } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { PageItem, FileItem, ExportSettings } from '../types/index.ts';
+import { buildPdfFromPages, PdfCompileOptions } from './pdfSplitter.ts';
 
 // Configure pdfjs worker safely
 try {
@@ -25,7 +26,6 @@ export async function renderPdfPageThumbnail(
     const loadingTask = pdfjsLib.getDocument({
       data: pdfBytes.slice(),
       useSystemFonts: true,
-      isEvalSupported: false,
     });
     const pdf = await loadingTask.promise;
     const page = await pdf.getPage(pageNumber);
@@ -157,63 +157,13 @@ export async function extractPdfPages(
 
 /**
  * Compile a merged PDF document based strictly on the user-arranged PageItem list!
- * Supports individual page rotations, page reordering across different documents, and skipping excluded pages.
+ * Supports individual page rotations, page reordering across different documents, page size/orientation, and skipping excluded pages.
  */
 export async function compileMergedPdf(
   pagesToInclude: PageItem[],
   fileMap: Map<string, FileItem>,
-  onProgress?: (progress: number, statusText: string) => void
+  onProgress?: (progress: number, statusText: string) => void,
+  options?: PdfCompileOptions
 ): Promise<Uint8Array> {
-  const mergedPdf = await PDFDocument.create();
-  const total = pagesToInclude.length;
-
-  if (total === 0) {
-    throw new Error('No pages selected for merging.');
-  }
-
-  // Cache loaded source PDFDocuments so we don't reload the same file multiple times
-  const loadedPdfCache = new Map<string, PDFDocument>();
-
-  for (let i = 0; i < total; i++) {
-    const pageItem = pagesToInclude[i];
-    const sourceFile = fileMap.get(pageItem.fileId);
-
-    if (!sourceFile || !sourceFile.pdfBytes) {
-      console.warn(`Source PDF bytes not found for file ${pageItem.fileId}`);
-      continue;
-    }
-
-    if (onProgress) {
-      const pct = Math.round(((i + 1) / total) * 100);
-      onProgress(pct, `正在處理頁面 ${i + 1} / ${total}: 來自 ${sourceFile.name} (第 ${pageItem.pageNumber} 頁)`);
-    }
-
-    let sourcePdf = loadedPdfCache.get(pageItem.fileId);
-    if (!sourcePdf) {
-      sourcePdf = await PDFDocument.load(sourceFile.pdfBytes);
-      loadedPdfCache.set(pageItem.fileId, sourcePdf);
-    }
-
-    // Check bounds
-    const maxPages = sourcePdf.getPageCount();
-    const sourceIdx = Math.min(Math.max(0, pageItem.sourcePageIndex), maxPages - 1);
-
-    // Copy page into merged document
-    const [copiedPage] = await mergedPdf.copyPages(sourcePdf, [sourceIdx]);
-
-    // Apply rotation
-    if (pageItem.rotation !== 0) {
-      const originalRot = copiedPage.getRotation().angle;
-      copiedPage.setRotation(degrees((originalRot + pageItem.rotation) % 360));
-    }
-
-    mergedPdf.addPage(copiedPage);
-  }
-
-  if (onProgress) {
-    onProgress(100, '正在生成最終 PDF 檔案...');
-  }
-
-  const outputBytes = await mergedPdf.save();
-  return outputBytes;
+  return buildPdfFromPages(pagesToInclude, fileMap, options, onProgress);
 }

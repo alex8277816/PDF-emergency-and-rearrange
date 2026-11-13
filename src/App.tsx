@@ -10,12 +10,13 @@ import { FileQueue } from './components/FileQueue.tsx';
 import { PageStudio } from './components/PageStudio.tsx';
 import { ExportPanel } from './components/ExportPanel.tsx';
 import { PagePreviewModal } from './components/PagePreviewModal.tsx';
-import { FileItem, PageItem, ExportSettings, ConversionState } from './types/index.ts';
+import { FileItem, PageItem, ExportSettings, ConversionState, SplitGroup } from './types/index.ts';
 import { detectFileType, sanitizeFileName } from './utils/fileTypes.ts';
 import { convertImageToPdf } from './utils/imageToPdf.ts';
 import { convertDocxToPdf } from './utils/docxConverter.ts';
 import { extractPdfPages, compileMergedPdf } from './utils/pdfEngine.ts';
-import { createZipFromPdfFiles, triggerFileDownload } from './utils/zipEngine.ts';
+import { buildSplitGroups, compileSplitGroups, buildPdfFromPages } from './utils/pdfSplitter.ts';
+import { createZipFromSplitFiles, triggerFileDownload } from './utils/zipEngine.ts';
 import {
   reorderPages,
   rotatePage,
@@ -50,6 +51,9 @@ export default function App() {
 
   const [settings, setSettings] = useState<ExportSettings>({
     outputMode: 'merge',
+    splitMode: 'per-page',
+    pagesPerSplit: 1,
+    customRanges: '1',
     mergedFileName: '彙整編排文件',
     pageSize: 'fit',
     orientation: 'auto',
@@ -62,6 +66,7 @@ export default function App() {
     currentStepText: '',
     overallProgress: 0,
   });
+  const [exportError, setExportError] = useState<string | null>(null);
 
   // Keep a map of file items by ID for fast lookup during compilation
   const fileMap = useMemo(() => {
@@ -69,6 +74,18 @@ export default function App() {
     files.forEach(f => map.set(f.id, f));
     return map;
   }, [files]);
+
+  // Compute split preview groups reactively from current pages and split settings
+  const splitResult = useMemo(
+    () =>
+      buildSplitGroups(pages, {
+        splitMode: settings.splitMode,
+        pagesPerSplit: settings.pagesPerSplit,
+        customRanges: settings.customRanges,
+        baseName: settings.mergedFileName,
+      }),
+    [pages, settings.splitMode, settings.pagesPerSplit, settings.customRanges, settings.mergedFileName]
+  );
 
   // Handle incoming files
   const processFiles = useCallback(async (newRawFiles: File[]) => {
@@ -322,9 +339,10 @@ export default function App() {
 
   // Export merged PDF
   const handleExportMerged = async () => {
+    setExportError(null);
     const includedPages = pages.filter(p => !p.isExcluded);
     if (includedPages.length === 0) {
-      alert('目前沒有已選擇匯出的頁面！請至少保留一頁以進行合併。');
+      setExportError('目前沒有已選擇匯出的頁面！請至少保留一頁以進行合併。');
       return;
     }
 
@@ -344,6 +362,10 @@ export default function App() {
             currentStepText: statusText,
             overallProgress: progress,
           });
+        },
+        {
+          pageSize: settings.pageSize,
+          orientation: settings.orientation,
         }
       );
 
@@ -357,7 +379,7 @@ export default function App() {
       });
     } catch (err) {
       console.error('Failed to merge PDF:', err);
-      alert('匯出 PDF 時發生錯誤: ' + (err instanceof Error ? err.message : String(err)));
+      setExportError('匯出 PDF 時發生錯誤: ' + (err instanceof Error ? err.message : String(err)));
       setConversionState({
         isConverting: false,
         currentStepText: '匯出失敗',
@@ -366,40 +388,144 @@ export default function App() {
     }
   };
 
-  // Export ZIP archive
-  const handleExportZip = async () => {
-    const readyFiles = files.filter(f => f.status === 'ready' && f.pdfBytes);
-    if (readyFiles.length === 0) {
-      alert('尚無已轉換完成的 PDF 檔案可供打包下載！');
+  // Export single split group PDF directly
+  const handleExportSingleSplitGroup = async (group: SplitGroup) => {
+    setExportError(null);
+    try {
+      setConversionState({
+        isConverting: true,
+        currentStepText: `正在拆分產生: ${group.fileName}`,
+        overallProgress: 40,
+      });
+
+      const pdfBytes = await buildPdfFromPages(group.pages, fileMap, {
+        pageSize: settings.pageSize,
+        orientation: settings.orientation,
+      });
+
+      triggerFileDownload(pdfBytes, group.fileName);
+
+      setConversionState({
+        isConverting: false,
+        currentStepText: `已下載 ${group.fileName}`,
+        overallProgress: 100,
+      });
+    } catch (err) {
+      console.error('Failed to export split PDF:', err);
+      setExportError('拆分產生 PDF 失敗: ' + (err instanceof Error ? err.message : String(err)));
+      setConversionState({
+        isConverting: false,
+        currentStepText: '拆分失敗',
+        overallProgress: 0,
+      });
+    }
+  };
+
+  // Export all split PDFs individually (one download per split PDF)
+  const handleExportIndividualAll = async () => {
+    setExportError(null);
+    if (splitResult.error || splitResult.groups.length === 0) {
+      setExportError(splitResult.error || '尚無可拆分的頁面！');
       return;
     }
 
     try {
       setConversionState({
         isConverting: true,
-        currentStepText: '正在封裝 ZIP 壓縮檔案...',
-        overallProgress: 20,
+        currentStepText: '正在拆分多份獨立 PDF...',
+        overallProgress: 10,
       });
 
-      const zipBlob = await createZipFromPdfFiles(readyFiles, progress => {
+      const compiledFiles = await compileSplitGroups(
+        splitResult.groups,
+        fileMap,
+        {
+          pageSize: settings.pageSize,
+          orientation: settings.orientation,
+        },
+        (progress, statusText) => {
+          setConversionState({
+            isConverting: true,
+            currentStepText: statusText,
+            overallProgress: progress,
+          });
+        }
+      );
+
+      for (let i = 0; i < compiledFiles.length; i++) {
+        const item = compiledFiles[i];
+        triggerFileDownload(item.pdfBytes, item.fileName);
+        if (i < compiledFiles.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 180));
+        }
+      }
+
+      setConversionState({
+        isConverting: false,
+        currentStepText: `已完成下載 ${compiledFiles.length} 份獨立 PDF！`,
+        overallProgress: 100,
+      });
+    } catch (err) {
+      console.error('Failed to export individual PDFs:', err);
+      setExportError('個別輸出 PDF 失敗: ' + (err instanceof Error ? err.message : String(err)));
+      setConversionState({
+        isConverting: false,
+        currentStepText: '拆分失敗',
+        overallProgress: 0,
+      });
+    }
+  };
+
+  // Export split PDFs packaged in ZIP archive
+  const handleExportZip = async () => {
+    setExportError(null);
+    if (splitResult.error || splitResult.groups.length === 0) {
+      setExportError(splitResult.error || '尚無可拆分的頁面！');
+      return;
+    }
+
+    try {
+      setConversionState({
+        isConverting: true,
+        currentStepText: '正在逐份拆分 PDF...',
+        overallProgress: 10,
+      });
+
+      const compiledFiles = await compileSplitGroups(
+        splitResult.groups,
+        fileMap,
+        {
+          pageSize: settings.pageSize,
+          orientation: settings.orientation,
+        },
+        (progress, statusText) => {
+          setConversionState({
+            isConverting: true,
+            currentStepText: statusText,
+            overallProgress: Math.round(progress * 0.7),
+          });
+        }
+      );
+
+      const zipBlob = await createZipFromSplitFiles(compiledFiles, progress => {
         setConversionState({
           isConverting: true,
-          currentStepText: `壓縮進度: ${progress}%`,
-          overallProgress: progress,
+          currentStepText: `正在封裝 ZIP 壓縮檔: ${progress}%`,
+          overallProgress: 70 + Math.round(progress * 0.3),
         });
       });
 
-      const fileName = `${sanitizeFileName(settings.mergedFileName, 'PDFMaster_All')}.zip`;
+      const fileName = `${sanitizeFileName(settings.mergedFileName, 'PDFMaster_Split')}.zip`;
       triggerFileDownload(zipBlob, fileName);
 
       setConversionState({
         isConverting: false,
-        currentStepText: 'ZIP 打包下載完成！',
+        currentStepText: '拆分與 ZIP 打包下載完成！',
         overallProgress: 100,
       });
     } catch (err) {
-      console.error('Failed to create ZIP:', err);
-      alert('打包 ZIP 壓縮檔失敗: ' + (err instanceof Error ? err.message : String(err)));
+      console.error('Failed to create split ZIP:', err);
+      setExportError('拆分打包 ZIP 壓縮檔失敗: ' + (err instanceof Error ? err.message : String(err)));
       setConversionState({
         isConverting: false,
         currentStepText: '打包失敗',
@@ -525,10 +651,29 @@ export default function App() {
             <section aria-label="匯出設定與下載">
               <ExportPanel
                 settings={settings}
-                onUpdateSettings={updates => setSettings(prev => ({ ...prev, ...updates }))}
+                onUpdateSettings={updates => {
+                  setSettings(prev => ({ ...prev, ...updates }));
+                  setExportError(null);
+                  if (
+                    updates.outputMode !== undefined ||
+                    updates.splitMode !== undefined ||
+                    updates.pagesPerSplit !== undefined ||
+                    updates.customRanges !== undefined
+                  ) {
+                    setConversionState(prev =>
+                      prev.isConverting ? prev : { isConverting: false, currentStepText: '', overallProgress: 0 }
+                    );
+                  }
+                }}
                 conversionState={conversionState}
                 onExportMerged={handleExportMerged}
                 onExportZip={handleExportZip}
+                onExportIndividualAll={handleExportIndividualAll}
+                onExportSingleSplitGroup={handleExportSingleSplitGroup}
+                splitGroups={splitResult.groups}
+                splitError={splitResult.error}
+                exportError={exportError}
+                onDismissExportError={() => setExportError(null)}
                 includedPageCount={includedPagesCount}
                 totalFileCount={files.length}
                 readyFileCount={readyFilesCount}

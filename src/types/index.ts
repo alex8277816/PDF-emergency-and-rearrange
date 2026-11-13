@@ -31,9 +31,21 @@ export interface PageItem {
 export type PageSizeOption = 'fit' | 'a4' | 'letter';
 export type PageOrientationOption = 'auto' | 'portrait' | 'landscape';
 export type ImageFitMode = 'contain' | 'cover' | 'stretch';
+export type IndividualSplitMode = 'per-page' | 'fixed-chunk' | 'custom-ranges' | 'per-file';
+
+export interface SplitGroup {
+  index: number;
+  title: string;
+  fileName: string;
+  pageLabel: string;
+  pages: PageItem[];
+}
 
 export interface ExportSettings {
   outputMode: 'merge' | 'individual';
+  splitMode: IndividualSplitMode;
+  pagesPerSplit: number;
+  customRanges: string;
   mergedFileName: string;
   pageSize: PageSizeOption;
   orientation: PageOrientationOption;
